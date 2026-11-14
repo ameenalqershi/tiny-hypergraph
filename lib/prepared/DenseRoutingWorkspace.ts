@@ -3,6 +3,7 @@ import type { Candidate, TinyHyperGraphSolver } from "../core"
 import { IndexedCandidateHeap } from "../indexed-candidate-heap"
 import type { RegionIntersectionCache } from "../types"
 import { PreparedRoutingGeometry } from "./PreparedRoutingGeometry"
+import type { RouteSearchCorridor } from "./RouteSearchCorridor"
 
 type Frontier = {
   neighbors: number[]
@@ -28,7 +29,7 @@ export class DenseRoutingWorkspace {
 
   constructor(readonly geometry: PreparedRoutingGeometry) {}
 
-  step(solver: TinyHyperGraphSolver): boolean {
+  step(solver: TinyHyperGraphSolver, corridor?: RouteSearchCorridor): boolean {
     const { topology: t, problem: p, state } = solver
     const queue = state.candidateQueue
     if (
@@ -53,6 +54,7 @@ export class DenseRoutingWorkspace {
       solver.onOutOfCandidates()
       return true
     }
+    if (corridor && !corridor.contains(c.portId, t.portX, t.portY)) return true
     const hop = c.hopId ?? solver.getHopId(c.portId, c.nextRegionId)
     if (
       c.g > solver.getCandidateBestCost(hop) ||
@@ -103,7 +105,7 @@ export class DenseRoutingWorkspace {
       frontier = { neighbors, next, nextRegions, hops, head }
       this.frontiers.set(region, frontier)
     }
-    this.expand(solver, c, frontier)
+    this.expand(solver, c, frontier, corridor)
     return true
   }
 
@@ -111,6 +113,7 @@ export class DenseRoutingWorkspace {
     solver: TinyHyperGraphSolver,
     c: Candidate,
     frontier: Frontier,
+    corridor?: RouteSearchCorridor,
   ): void {
     const { topology: t, problem: p, state } = solver
     const region = c.nextRegionId
@@ -181,6 +184,7 @@ export class DenseRoutingWorkspace {
       const before = previous
       previous = at
       const port = neighbors[at]!
+      if (corridor && !corridor.contains(port, t.portX, t.portY)) continue
       if (port === state.goalPortId) {
         solver.onPathFound(c)
         return

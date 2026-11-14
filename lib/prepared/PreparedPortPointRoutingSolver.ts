@@ -4,6 +4,7 @@ import { SelectiveReripTinyHyperGraphSolver } from "../selective-rerip-tiny-hype
 import { SelectiveReripTinyHyperGraphSolverWithStableInitialAssignments } from "./SelectiveReripTinyHyperGraphSolverWithStableInitialAssignments"
 import { DenseRoutingWorkspace } from "./DenseRoutingWorkspace"
 import { PreparedRoutingGeometry } from "./PreparedRoutingGeometry"
+import { RouteSearchCorridor } from "./RouteSearchCorridor"
 
 class PreparedFinalRouteSolver extends SelectiveReripTinyHyperGraphSolver {
   private readonly workspace: DenseRoutingWorkspace
@@ -36,12 +37,134 @@ export class PreparedPortPointRoutingSolver extends SelectiveReripTinyHyperGraph
   private readonly geometry = new PreparedRoutingGeometry(this.topology)
   private readonly workspace = new DenseRoutingWorkspace(this.geometry)
   private asyncRunning = false
+  private readonly corridor?: RouteSearchCorridor
+  private corridorRouteId?: number
+  private corridorIterationStart = 0
+  readonly corridorStats = {
+    widened: 0,
+    fullFallbacks: 0,
+    boundedRouteStarts: 0,
+  }
+
+  constructor(
+    topology: TinyHyperGraphSolver["topology"],
+    problem: TinyHyperGraphSolver["problem"],
+    options?: TinyHyperGraphSolverOptions,
+  ) {
+    super(topology, problem, options)
+    if (options?.LOCAL_ROUTE_CORRIDOR_INITIAL_MARGIN !== undefined) {
+      this.corridor = new RouteSearchCorridor({
+        initialMargin: options.LOCAL_ROUTE_CORRIDOR_INITIAL_MARGIN,
+        growthFactor: options.LOCAL_ROUTE_CORRIDOR_GROWTH_FACTOR,
+        maxExpansions: options.LOCAL_ROUTE_CORRIDOR_MAX_EXPANSIONS,
+        perWindowIterationBudget:
+          options.LOCAL_ROUTE_CORRIDOR_WINDOW_ITERATIONS,
+      })
+    }
+  }
+
+  private startCorridor(routeId: number): void {
+    this.corridorRouteId = routeId
+    this.corridorIterationStart = this.iterations
+    this.corridor?.start(
+      this.getRouteStartPortId(routeId),
+      this.getRouteEndPortId(routeId),
+      this.topology.portX,
+      this.topology.portY,
+    )
+    this.routeSearchPortPredicate = this.corridor?.isBounded
+      ? (portId) =>
+          this.corridor!.contains(
+            portId,
+            this.topology.portX,
+            this.topology.portY,
+          )
+      : undefined
+    if (this.corridor?.isBounded) this.corridorStats.boundedRouteStarts++
+  }
+
+  /** Reset only the active tentative search, never an accepted route or global
+   * assignment. Clearing the native heap invalidates all cached frontiers. */
+  private restartCurrentRoute(): void {
+    const routeId = this.state.currentRouteId
+    if (routeId === undefined)
+      throw new Error("No current route for corridor restart")
+    const startPort = this.getRouteStartPortId(routeId)
+    const startRegion = this.getStartingNextRegionId(routeId, startPort)
+    if (startRegion === undefined)
+      throw new Error("No starting region for corridor restart")
+    const hop = this.getHopId(startPort, startRegion)
+    this.state.candidateQueue.clear()
+    this.resetCandidateBestCosts()
+    this.setCandidateBestCost(hop, 0)
+    this.state.candidateQueue.queue({
+      hopId: hop,
+      portId: startPort,
+      nextRegionId: startRegion,
+      f: 0,
+      g: 0,
+      h: 0,
+    })
+    this.state.goalPortId = this.getRouteEndPortId(routeId)
+    this.corridorIterationStart = this.iterations
+  }
+
+  private widenAndRestart(): boolean {
+    if (
+      !this.corridor?.isBounded ||
+      this.corridorRouteId !== this.state.currentRouteId ||
+      (this.state.currentRouteId !== undefined &&
+        this.partialRipRoutePlans.has(this.state.currentRouteId))
+    )
+      return false
+    const widened = this.corridor.widen(
+      this.topology.portX,
+      this.topology.portY,
+    )
+    if (!widened) return false
+    if (this.corridor.isBounded) this.corridorStats.widened++
+    else {
+      this.corridorStats.fullFallbacks++
+      this.routeSearchPortPredicate = undefined
+    }
+    this.restartCurrentRoute()
+    return true
+  }
+
+  override onOutOfCandidates(): void {
+    if (this.widenAndRestart()) return
+    super.onOutOfCandidates()
+  }
 
   override _step(): void {
     const routeId = this.state.currentRouteId
+    const nextRoute = routeId ?? this.state.unroutedRoutes[0]
+    if (nextRoute !== undefined && this.partialRipRoutePlans.has(nextRoute)) {
+      // A partial-rip plan uses its own path geometry: never clip it.
+      this.routeSearchPortPredicate = undefined
+    } else if (
+      this.corridor &&
+      nextRoute !== undefined &&
+      nextRoute !== this.corridorRouteId
+    )
+      this.startCorridor(nextRoute)
+    const active =
+      routeId !== undefined &&
+      this.corridorRouteId === routeId &&
+      !this.partialRipRoutePlans.has(routeId)
+        ? this.corridor
+        : undefined
+    if (
+      active?.isBounded &&
+      this.iterations - this.corridorIterationStart >=
+        active.perWindowIterationBudget
+    ) {
+      this.widenAndRestart()
+      return
+    }
     if (
       (routeId !== undefined && this.partialRipRoutePlans.has(routeId)) ||
-      !this.workspace.step(this)
+      !this.workspace.step(this, active)
     )
       super._step()
   }

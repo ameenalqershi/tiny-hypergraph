@@ -324,6 +324,11 @@ export interface TinyHyperGraphSolverOptions {
   OUTSIDE_IN_ROUTING?: boolean
   /** Maximum geometric distance explored by either outside-in frontier. */
   OUTSIDE_IN_MAX_DISTANCE?: number
+  /** Experimental: opt-in XY locality for prepared route search only. Disabled by default. */
+  LOCAL_ROUTE_CORRIDOR_INITIAL_MARGIN?: number
+  LOCAL_ROUTE_CORRIDOR_GROWTH_FACTOR?: number
+  LOCAL_ROUTE_CORRIDOR_MAX_EXPANSIONS?: number
+  LOCAL_ROUTE_CORRIDOR_WINDOW_ITERATIONS?: number
 }
 
 export interface TinyHyperGraphSolverOptionTarget {
@@ -574,6 +579,8 @@ export class TinyHyperGraphSolver extends BaseSolver {
   USE_LAZY_ROUTE_HEURISTIC = true
   USE_SPARSE_CANDIDATE_STORAGE = false
   OWNED_REGIONAL_HOP_FRONTIER = false
+  /** Optional route-scoped candidate filter; undefined in normal routing. */
+  routeSearchPortPredicate?: (portId: PortId) => boolean
 
   override MAX_ITERATIONS = 1e6
   VERBOSE = false
@@ -870,6 +877,11 @@ export class TinyHyperGraphSolver extends BaseSolver {
     const currentCandidateHopId =
       currentCandidate.hopId ??
       this.getHopId(currentCandidate.portId, currentCandidate.nextRegionId)
+    if (
+      this.routeSearchPortPredicate &&
+      !this.routeSearchPortPredicate(currentCandidate.portId)
+    )
+      return
     if (currentCandidate.g > this.getCandidateBestCost(currentCandidateHopId)) {
       return
     }
@@ -893,6 +905,11 @@ export class TinyHyperGraphSolver extends BaseSolver {
     }
 
     for (const neighborPortId of neighbors) {
+      if (
+        this.routeSearchPortPredicate &&
+        !this.routeSearchPortPredicate(neighborPortId)
+      )
+        continue
       if (neighborPortId === state.goalPortId) {
         const assignedNetId = state.portAssignment[neighborPortId]
         if (this.isPortReservedForDifferentNet(neighborPortId)) continue
@@ -1046,6 +1063,11 @@ export class TinyHyperGraphSolver extends BaseSolver {
       const previousIndex = previousNeighborIndex
       previousNeighborIndex = currentNeighborIndex
       const neighborPortId = neighbors[currentNeighborIndex]!
+      if (
+        this.routeSearchPortPredicate &&
+        !this.routeSearchPortPredicate(neighborPortId)
+      )
+        continue
       if (neighborPortId === state.goalPortId) {
         const assignedNetId = state.portAssignment[neighborPortId]
         if (this.isPortReservedForDifferentNet(neighborPortId)) continue
