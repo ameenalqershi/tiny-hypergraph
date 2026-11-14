@@ -330,6 +330,8 @@ export interface TinyHyperGraphSolverOptions {
   LOCAL_ROUTE_CORRIDOR_GROWTH_FACTOR?: number
   LOCAL_ROUTE_CORRIDOR_MAX_EXPANSIONS?: number
   LOCAL_ROUTE_CORRIDOR_WINDOW_ITERATIONS?: number
+  /** Opt-in static region graph preflight; never rejects an electrical route. */
+  LOCAL_ROUTE_CORRIDOR_REGION_PREFLIGHT?: boolean
   /** Optional bounded, read-only per-route search counters. No algorithm change. */
   ROUTE_SEARCH_DIAGNOSTICS?: boolean
 }

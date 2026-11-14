@@ -6,6 +6,7 @@ import { DenseRoutingWorkspace } from "./DenseRoutingWorkspace"
 import { PreparedRoutingGeometry } from "./PreparedRoutingGeometry"
 import { RouteSearchCorridor } from "./RouteSearchCorridor"
 import { RouteSearchDiagnostics } from "./RouteSearchDiagnostics"
+import { computeConservativeRegionRouteWitness } from "./ConservativeRegionReachability"
 
 class PreparedFinalRouteSolver extends SelectiveReripTinyHyperGraphSolver {
   private readonly workspace: DenseRoutingWorkspace
@@ -41,6 +42,15 @@ export class PreparedPortPointRoutingSolver extends SelectiveReripTinyHyperGraph
   private readonly corridor?: RouteSearchCorridor
   private corridorRouteId?: number
   private corridorIterationStart = 0
+  private readonly preflightEnabled: boolean
+  readonly preflightStats = {
+    checks: 0,
+    reachable: 0,
+    unreachableWindowsSkipped: 0,
+    inconclusive: 0,
+    scannedPorts: 0,
+    visitedRegions: 0,
+  }
   readonly corridorStats = {
     widened: 0,
     fullFallbacks: 0,
@@ -53,6 +63,14 @@ export class PreparedPortPointRoutingSolver extends SelectiveReripTinyHyperGraph
     options?: TinyHyperGraphSolverOptions,
   ) {
     super(topology, problem, options)
+    this.preflightEnabled =
+      options?.LOCAL_ROUTE_CORRIDOR_REGION_PREFLIGHT === true
+    if (
+      this.preflightEnabled &&
+      options?.LOCAL_ROUTE_CORRIDOR_INITIAL_MARGIN === undefined
+    ) {
+      throw new Error("Region preflight requires an enabled route corridor")
+    }
     if (options?.ROUTE_SEARCH_DIAGNOSTICS === true) {
       this.routeSearchDiagnostics = new RouteSearchDiagnostics()
     }
@@ -90,6 +108,59 @@ export class PreparedPortPointRoutingSolver extends SelectiveReripTinyHyperGraph
       this.corridor?.currentMargin ?? null,
     )
     if (this.corridor?.isBounded) this.corridorStats.boundedRouteStarts++
+    this.skipUnreachableCorridorWindows(routeId)
+  }
+
+  /** A negative STATIC abstract witness only skips this bounded window.
+   * Always retain the original unrestricted native routing fallback. */
+  private skipUnreachableCorridorWindows(routeId: number): void {
+    if (
+      !this.preflightEnabled ||
+      !this.corridor?.isBounded ||
+      this.partialRipRoutePlans.has(routeId)
+    )
+      return
+    const graph = this.topology
+    const netId = this.problem.routeNet[routeId]!
+    while (this.corridor.isBounded) {
+      const result = computeConservativeRegionRouteWitness({
+        graph,
+        restrictions: {
+          regionNetId: this.problem.regionNetId,
+          portSectionMask: this.problem.portSectionMask,
+          portEndpointReservationNetId:
+            this.problemSetup.portEndpointReservationNetId,
+        },
+        startPortId: this.getRouteStartPortId(routeId),
+        goalPortId: this.getRouteEndPortId(routeId),
+        netId,
+        isPortVisible: (portId) =>
+          this.corridor!.contains(portId, graph.portX, graph.portY),
+      })
+      this.preflightStats.checks++
+      this.preflightStats.scannedPorts += result.scannedPorts
+      this.preflightStats.visitedRegions += result.visitedRegions
+      if (result.status === "reachable") {
+        this.preflightStats.reachable++
+        return
+      }
+      if (result.status === "inconclusive") {
+        this.preflightStats.inconclusive++
+        return
+      }
+      this.preflightStats.unreachableWindowsSkipped++
+      const widened = this.corridor.widen(graph.portX, graph.portY)
+      if (!widened) break
+      if (this.corridor.isBounded) this.corridorStats.widened++
+      else this.corridorStats.fullFallbacks++
+      this.routeSearchPortPredicate = this.corridor.isBounded
+        ? (portId) => this.corridor!.contains(portId, graph.portX, graph.portY)
+        : undefined
+      this.routeSearchDiagnostics?.nextWindow(
+        this.iterations,
+        this.corridor.currentMargin,
+      )
+    }
   }
 
   /** Reset only the active tentative search, never an accepted route or global
@@ -140,6 +211,7 @@ export class PreparedPortPointRoutingSolver extends SelectiveReripTinyHyperGraph
       this.iterations,
       this.corridor.currentMargin,
     )
+    this.skipUnreachableCorridorWindows(this.state.currentRouteId!)
     this.restartCurrentRoute()
     return true
   }
