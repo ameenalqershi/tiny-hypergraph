@@ -97,3 +97,40 @@ test("pruned and unpruned paths remain deterministic for fixed section masks and
     expect(opt.state.portAssignment).toEqual(base.state.portAssignment)
   }
 })
+
+test("two competing nets re-invalidate cached frontier exclusions after route changes", () => {
+  const f = createPreparedRoutingFixture()
+  f.problem.routeCount = 2
+  f.problem.routeStartPort = Int32Array.from([
+    f.problem.routeStartPort[0]!,
+    f.problem.routeStartPort[1]!,
+  ])
+  f.problem.routeEndPort = Int32Array.from([
+    f.problem.routeEndPort[0]!,
+    f.problem.routeEndPort[1]!,
+  ])
+  f.problem.routeNet = Int32Array.from([17, 18])
+  const options = {
+    ...f.options,
+    OWNED_REGIONAL_HOP_FRONTIER: true,
+    STATIC_REACHABILITY_PRECHECK: false,
+    ACCEPT_BEST_SOLUTION_ON_TIMEOUT: false,
+    MAX_ITERATIONS: 100000,
+  }
+  const baseline = new PreparedPortPointRoutingSolver(
+    f.topology,
+    f.problem,
+    options,
+  )
+  const cached = new PreparedPortPointRoutingSolver(f.topology, f.problem, {
+    ...options,
+    PRUNE_STATIC_FRONTIER_REJECTIONS: true,
+  })
+  baseline.solve()
+  cached.solve()
+  expect(cached.solved).toBe(baseline.solved)
+  expect(cached.failed).toBe(baseline.failed)
+  expect(cached.state.regionSegments).toEqual(baseline.state.regionSegments)
+  expect(cached.state.portAssignment).toEqual(baseline.state.portAssignment)
+  expect(cached.iterations).toBe(baseline.iterations)
+})
