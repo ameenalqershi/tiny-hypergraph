@@ -510,3 +510,34 @@ test("owned regional frontier preserves routing and search invalidation", () => 
   expect(keyQueries.filter((portId) => portId === 1)).toHaveLength(4)
   expect(heap.toArray().map((candidate) => candidate.portId)).toContain(1)
 })
+
+test("static frontier pruning must recheck a live foreign-net goal assignment when occupancy clears", () => {
+  const run = (enableStaticPruning: boolean) => {
+    const { solver } = makeManual(
+      true,
+      true,
+      DistanceAwareTinyHyperGraphSolver,
+      makeProblem(2),
+    )
+    solver.PRUNE_STATIC_FRONTIER_REJECTIONS = enableStaticPruning
+    solver.state.goalPortId = 2
+    // A route still in the SAME owned frontier epoch sees a temporarily owned
+    // goal. The next queued candidate must reconsider it after release.
+    solver.state.portAssignment[2] = 9
+    const first = step(solver)
+    expect(first.error).toBeUndefined()
+    expect(solver.solved).toBe(false)
+    solver.state.portAssignment[2] = -1
+    const second = step(solver)
+    return {
+      second,
+      solved: solver.solved,
+      stats: solver.staticFrontierPruningStats,
+    }
+  }
+  const reference = run(false)
+  const enabled = run(true)
+  expect(reference.second.state.queue.map((x: any) => x.portId)).toContain(2)
+  expect(enabled.second).toEqual(reference.second)
+  expect(enabled.stats.otherNetPortAssignment).toBe(0)
+})

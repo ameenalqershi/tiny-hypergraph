@@ -1153,16 +1153,9 @@ export class TinyHyperGraphSolver extends BaseSolver {
           continue
         }
         if (assignedNetId !== -1 && assignedNetId !== state.currentRouteNetId) {
+          // Dynamic port occupancy may clear within this same queue epoch.
+          // Keep the neighbor live and reconsider it on the next expansion.
           this.routeSearchDiagnostics?.record("differentNetPortAssignment")
-          if (this.PRUNE_STATIC_FRONTIER_REJECTIONS) {
-            this.pruneStaticallyRejectedNeighbor(
-              frontier,
-              previousIndex,
-              neighborIndex,
-            )
-            previousNeighborIndex = previousIndex
-            this.staticFrontierPruningStats.otherNetPortAssignment++
-          }
           continue
         }
         this.onPathFound(currentCandidate)
