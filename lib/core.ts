@@ -290,6 +290,8 @@ export interface TinyHyperGraphSolverOptions {
    * metadata. Other queue implementations use the original search.
    */
   OWNED_REGIONAL_HOP_FRONTIER?: boolean
+  /** Optional: permanently skip immutable per-route region/port exclusions in owned frontier. */
+  PRUNE_STATIC_FRONTIER_REJECTIONS?: boolean
   MAX_ITERATIONS?: number
   VERBOSE?: boolean
   STATIC_REACHABILITY_PRECHECK?: boolean
@@ -345,6 +347,7 @@ export interface TinyHyperGraphSolverOptionTarget {
   USE_LAZY_ROUTE_HEURISTIC?: boolean
   USE_SPARSE_CANDIDATE_STORAGE?: boolean
   OWNED_REGIONAL_HOP_FRONTIER?: boolean
+  PRUNE_STATIC_FRONTIER_REJECTIONS?: boolean
   MAX_ITERATIONS: number
   VERBOSE: boolean
   STATIC_REACHABILITY_PRECHECK: boolean
@@ -407,6 +410,10 @@ export const applyTinyHyperGraphSolverOptions = (
   }
   if (options.OWNED_REGIONAL_HOP_FRONTIER !== undefined) {
     solver.OWNED_REGIONAL_HOP_FRONTIER = options.OWNED_REGIONAL_HOP_FRONTIER
+  }
+  if (options.PRUNE_STATIC_FRONTIER_REJECTIONS !== undefined) {
+    solver.PRUNE_STATIC_FRONTIER_REJECTIONS =
+      options.PRUNE_STATIC_FRONTIER_REJECTIONS
   }
   if (options.MAX_ITERATIONS !== undefined) {
     solver.MAX_ITERATIONS = options.MAX_ITERATIONS
@@ -488,6 +495,7 @@ export const getTinyHyperGraphSolverOptions = (
   USE_LAZY_ROUTE_HEURISTIC: solver.USE_LAZY_ROUTE_HEURISTIC,
   USE_SPARSE_CANDIDATE_STORAGE: solver.USE_SPARSE_CANDIDATE_STORAGE,
   OWNED_REGIONAL_HOP_FRONTIER: solver.OWNED_REGIONAL_HOP_FRONTIER,
+  PRUNE_STATIC_FRONTIER_REJECTIONS: solver.PRUNE_STATIC_FRONTIER_REJECTIONS,
   MAX_ITERATIONS: solver.MAX_ITERATIONS,
   VERBOSE: solver.VERBOSE,
   STATIC_REACHABILITY_PRECHECK: solver.STATIC_REACHABILITY_PRECHECK,
@@ -582,6 +590,14 @@ export class TinyHyperGraphSolver extends BaseSolver {
   USE_LAZY_ROUTE_HEURISTIC = true
   USE_SPARSE_CANDIDATE_STORAGE = false
   OWNED_REGIONAL_HOP_FRONTIER = false
+  PRUNE_STATIC_FRONTIER_REJECTIONS = false
+  readonly staticFrontierPruningStats = {
+    portMask: 0,
+    invalidIncidence: 0,
+    otherNetPortReservation: 0,
+    otherNetPortAssignment: 0,
+    otherNetRegionReservation: 0,
+  }
   /** Optional route-scoped candidate filter; undefined in normal routing. */
   routeSearchPortPredicate?: (portId: PortId) => boolean
   routeSearchDiagnostics?: RouteSearchDiagnostics
@@ -1087,6 +1103,17 @@ export class TinyHyperGraphSolver extends BaseSolver {
     return frontier
   }
 
+  /** Only use when the rejection is immutable throughout the active route.
+   * The owned-region frontier is invalidated by queue reset/route epoch changes. */
+  private pruneStaticallyRejectedNeighbor(
+    frontier: RegionalHopFrontier,
+    previousIndex: number,
+    nextIndex: number,
+  ): void {
+    if (previousIndex === -1) frontier.head = nextIndex
+    else frontier.next[previousIndex] = nextIndex
+  }
+
   private expandRegionalHopFrontier(
     currentCandidate: Candidate,
     frontier: RegionalHopFrontier,
@@ -1114,10 +1141,28 @@ export class TinyHyperGraphSolver extends BaseSolver {
         const assignedNetId = state.portAssignment[neighborPortId]
         if (this.isPortReservedForDifferentNet(neighborPortId)) {
           this.routeSearchDiagnostics?.record("differentNetPortReservation")
+          if (this.PRUNE_STATIC_FRONTIER_REJECTIONS) {
+            this.pruneStaticallyRejectedNeighbor(
+              frontier,
+              previousIndex,
+              neighborIndex,
+            )
+            previousNeighborIndex = previousIndex
+            this.staticFrontierPruningStats.otherNetPortReservation++
+          }
           continue
         }
         if (assignedNetId !== -1 && assignedNetId !== state.currentRouteNetId) {
           this.routeSearchDiagnostics?.record("differentNetPortAssignment")
+          if (this.PRUNE_STATIC_FRONTIER_REJECTIONS) {
+            this.pruneStaticallyRejectedNeighbor(
+              frontier,
+              previousIndex,
+              neighborIndex,
+            )
+            previousNeighborIndex = previousIndex
+            this.staticFrontierPruningStats.otherNetPortAssignment++
+          }
           continue
         }
         this.onPathFound(currentCandidate)
@@ -1132,6 +1177,15 @@ export class TinyHyperGraphSolver extends BaseSolver {
       } else {
         if (problem.portSectionMask[neighborPortId] === 0) {
           this.routeSearchDiagnostics?.record("portMasked")
+          if (this.PRUNE_STATIC_FRONTIER_REJECTIONS) {
+            this.pruneStaticallyRejectedNeighbor(
+              frontier,
+              previousIndex,
+              neighborIndex,
+            )
+            previousNeighborIndex = previousIndex
+            this.staticFrontierPruningStats.portMask++
+          }
           continue
         }
         const nextRegion =
@@ -1139,7 +1193,18 @@ export class TinyHyperGraphSolver extends BaseSolver {
           currentCandidate.nextRegionId
             ? topology.incidentPortRegion[neighborPortId][1]
             : topology.incidentPortRegion[neighborPortId][0]
-        if (nextRegion === undefined) continue
+        if (nextRegion === undefined) {
+          if (this.PRUNE_STATIC_FRONTIER_REJECTIONS) {
+            this.pruneStaticallyRejectedNeighbor(
+              frontier,
+              previousIndex,
+              neighborIndex,
+            )
+            previousNeighborIndex = previousIndex
+            this.staticFrontierPruningStats.invalidIncidence++
+          }
+          continue
+        }
         nextRegionId = nextRegion
         candidateHopId = this.getHopId(neighborPortId, nextRegionId)
       }
@@ -1168,6 +1233,15 @@ export class TinyHyperGraphSolver extends BaseSolver {
         }
         if (this.isRegionReservedForDifferentNet(nextRegionId)) {
           this.routeSearchDiagnostics?.record("differentNetRegionReservation")
+          if (this.PRUNE_STATIC_FRONTIER_REJECTIONS) {
+            this.pruneStaticallyRejectedNeighbor(
+              frontier,
+              previousIndex,
+              neighborIndex,
+            )
+            previousNeighborIndex = previousIndex
+            this.staticFrontierPruningStats.otherNetRegionReservation++
+          }
           continue
         }
         nextRegionIds[currentNeighborIndex] = nextRegionId
