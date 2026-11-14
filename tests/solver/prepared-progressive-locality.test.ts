@@ -280,3 +280,17 @@ test("a truly disconnected source stays unconnected after every corridor fallbac
   expect(adaptive.state.portAssignment).toEqual(original.state.portAssignment)
   expect(Array.from(problem.portSectionMask)).toEqual(initialMask)
 })
+
+test("a requeued route with the same ID receives a fresh local search epoch", () => {
+  const f = singleRouteFixture()
+  const solver = new PreparedPortPointRoutingSolver(f.topology, f.problem, {
+    ...f.options,
+    LOCAL_ROUTE_CORRIDOR_INITIAL_MARGIN: 1,
+  })
+  // A global rerip may requeue the most recent ID before any other route starts.
+  // This stale metadata is intentionally injected to test route-epoch renewal.
+  ;(solver as unknown as { corridorRouteId: number }).corridorRouteId = 0
+  solver.step()
+  expect(solver.corridorStats.boundedRouteStarts).toBe(1)
+  expect(solver.state.currentRouteId).toBe(0)
+})

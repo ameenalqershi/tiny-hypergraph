@@ -145,7 +145,7 @@ export class PreparedPortPointRoutingSolver extends SelectiveReripTinyHyperGraph
     } else if (
       this.corridor &&
       nextRoute !== undefined &&
-      nextRoute !== this.corridorRouteId
+      (routeId === undefined || nextRoute !== this.corridorRouteId)
     )
       this.startCorridor(nextRoute)
     const active =
