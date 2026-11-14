@@ -164,7 +164,7 @@ export class PreparedPortPointRoutingSolver extends SelectiveReripTinyHyperGraph
       // A partial-rip plan uses its own path geometry: never clip it.
       this.routeSearchPortPredicate = undefined
     } else if (
-      this.corridor &&
+      (this.corridor || this.routeSearchDiagnostics) &&
       nextRoute !== undefined &&
       (routeId === undefined || nextRoute !== this.corridorRouteId)
     )

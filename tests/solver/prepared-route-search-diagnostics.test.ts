@@ -110,3 +110,29 @@ test("unsupported dense graph records native frontier pops and neighbor decision
   expect(records.totalByReason.neighborScanned).toBeGreaterThan(0)
   expect(records.totalByReason.pathFound).toBe(1)
 })
+
+test("diagnostics alone can observe unrestricted native routing without enabling locality", () => {
+  const f = onlyFirstRoute()
+  f.topology.incidentPortRegion[2]!.push(2)
+  f.topology.regionIncidentPorts[2]!.push(2)
+  const baseline = new PreparedPortPointRoutingSolver(
+    f.topology,
+    f.problem,
+    f.options,
+  )
+  const measured = new PreparedPortPointRoutingSolver(f.topology, f.problem, {
+    ...f.options,
+    ROUTE_SEARCH_DIAGNOSTICS: true,
+  })
+  baseline.solve()
+  measured.solve()
+  expect(baseline.solved).toBe(true)
+  expect(measured.solved).toBe(true)
+  expect(measured.state.portAssignment).toEqual(baseline.state.portAssignment)
+  expect(measured.state.regionSegments).toEqual(baseline.state.regionSegments)
+  expect(measured.corridorStats.boundedRouteStarts).toBe(0)
+  const stats = measured.routeSearchDiagnostics!.snapshot(measured.iterations)
+  expect(stats.completedRouteCount).toBe(1)
+  expect(stats.totalByWindowKind.unrestricted.queuePop).toBeGreaterThan(0)
+  expect(stats.totalByWindowKind.local.queuePop).toBeUndefined()
+})
