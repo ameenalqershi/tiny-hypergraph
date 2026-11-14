@@ -330,6 +330,10 @@ export interface TinyHyperGraphSolverOptions {
   LOCAL_ROUTE_CORRIDOR_GROWTH_FACTOR?: number
   LOCAL_ROUTE_CORRIDOR_MAX_EXPANSIONS?: number
   LOCAL_ROUTE_CORRIDOR_WINDOW_ITERATIONS?: number
+  /** Experimental only: bounded weighted-A* attempt in unrestricted fallback.
+   * Always restart original exact unweighted A* if its separate budget expires. */
+  LOCAL_ROUTE_WEIGHTED_FALLBACK_FACTOR?: number
+  LOCAL_ROUTE_WEIGHTED_FALLBACK_ITERATIONS?: number
   /** Optional bounded, read-only per-route search counters. No algorithm change. */
   ROUTE_SEARCH_DIAGNOSTICS?: boolean
 }

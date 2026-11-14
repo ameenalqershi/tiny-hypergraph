@@ -41,6 +41,15 @@ export class PreparedPortPointRoutingSolver extends SelectiveReripTinyHyperGraph
   private readonly corridor?: RouteSearchCorridor
   private corridorRouteId?: number
   private corridorIterationStart = 0
+  private readonly weightedFallbackFactor: number
+  private readonly weightedFallbackIterationLimit: number
+  private weightedFallbackStartIteration = 0
+  private weightedFallbackActive = false
+  readonly weightedFallbackStats = {
+    attempted: 0,
+    solved: 0,
+    returnedToExact: 0,
+  }
   readonly corridorStats = {
     widened: 0,
     fullFallbacks: 0,
@@ -53,6 +62,22 @@ export class PreparedPortPointRoutingSolver extends SelectiveReripTinyHyperGraph
     options?: TinyHyperGraphSolverOptions,
   ) {
     super(topology, problem, options)
+    this.weightedFallbackFactor =
+      options?.LOCAL_ROUTE_WEIGHTED_FALLBACK_FACTOR ?? 1
+    this.weightedFallbackIterationLimit =
+      options?.LOCAL_ROUTE_WEIGHTED_FALLBACK_ITERATIONS ?? 32_000
+    if (
+      !Number.isFinite(this.weightedFallbackFactor) ||
+      this.weightedFallbackFactor < 1 ||
+      !Number.isInteger(this.weightedFallbackIterationLimit) ||
+      this.weightedFallbackIterationLimit < 1 ||
+      (this.weightedFallbackFactor > 1 &&
+        options?.LOCAL_ROUTE_CORRIDOR_INITIAL_MARGIN === undefined)
+    ) {
+      throw new Error(
+        "Invalid weighted-A* fallback configuration; requires a route corridor",
+      )
+    }
     if (options?.ROUTE_SEARCH_DIAGNOSTICS === true) {
       this.routeSearchDiagnostics = new RouteSearchDiagnostics()
     }
@@ -68,6 +93,7 @@ export class PreparedPortPointRoutingSolver extends SelectiveReripTinyHyperGraph
   }
 
   private startCorridor(routeId: number): void {
+    this.weightedFallbackActive = false
     this.corridorRouteId = routeId
     this.corridorIterationStart = this.iterations
     this.corridor?.start(
@@ -118,6 +144,32 @@ export class PreparedPortPointRoutingSolver extends SelectiveReripTinyHyperGraph
     this.corridorIterationStart = this.iterations
   }
 
+  /** Priority-only heuristic guide. g, reservation checks and copper geometry
+   * remain native; exact unweighted search follows on timeout or exhaustion. */
+  override computeH(
+    portId: Parameters<TinyHyperGraphSolver["computeH"]>[0],
+  ): number {
+    const nativeH = super.computeH(portId)
+    return this.weightedFallbackActive
+      ? nativeH * this.weightedFallbackFactor
+      : nativeH
+  }
+
+  private returnToExactFallback(): void {
+    if (!this.weightedFallbackActive) return
+    this.weightedFallbackActive = false
+    this.weightedFallbackStats.returnedToExact++
+    this.routeSearchDiagnostics?.nextWindow(this.iterations, null)
+    this.restartCurrentRoute()
+  }
+
+  private enterWeightedFallback(): void {
+    if (this.weightedFallbackFactor <= 1) return
+    this.weightedFallbackActive = true
+    this.weightedFallbackStartIteration = this.iterations
+    this.weightedFallbackStats.attempted++
+  }
+
   private widenAndRestart(): boolean {
     if (
       !this.corridor?.isBounded ||
@@ -135,6 +187,7 @@ export class PreparedPortPointRoutingSolver extends SelectiveReripTinyHyperGraph
     else {
       this.corridorStats.fullFallbacks++
       this.routeSearchPortPredicate = undefined
+      this.enterWeightedFallback()
     }
     this.routeSearchDiagnostics?.nextWindow(
       this.iterations,
@@ -147,17 +200,33 @@ export class PreparedPortPointRoutingSolver extends SelectiveReripTinyHyperGraph
   override onPathFound(
     candidate: Parameters<TinyHyperGraphSolver["onPathFound"]>[0],
   ): void {
+    if (this.weightedFallbackActive) {
+      this.weightedFallbackStats.solved++
+      this.weightedFallbackActive = false
+    }
     this.routeSearchDiagnostics?.record("pathFound")
     this.routeSearchDiagnostics?.endRoute(this.iterations, true)
     super.onPathFound(candidate)
   }
 
   override onOutOfCandidates(): void {
+    if (this.weightedFallbackActive) {
+      this.returnToExactFallback()
+      return
+    }
     if (this.widenAndRestart()) return
     super.onOutOfCandidates()
   }
 
   override _step(): void {
+    if (
+      this.weightedFallbackActive &&
+      this.iterations - this.weightedFallbackStartIteration >=
+        this.weightedFallbackIterationLimit
+    ) {
+      this.returnToExactFallback()
+      return
+    }
     const routeId = this.state.currentRouteId
     const nextRoute = routeId ?? this.state.unroutedRoutes[0]
     if (nextRoute !== undefined && this.partialRipRoutePlans.has(nextRoute)) {
