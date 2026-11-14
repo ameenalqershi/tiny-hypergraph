@@ -170,3 +170,53 @@ test("unsupported dense workspace still applies corridor to native search and sa
   expect(adapted.state.regionSegments).toEqual(baseline.state.regionSegments)
   expect(adapted.state.portAssignment).toEqual(baseline.state.portAssignment)
 })
+
+test("intermediate widening can recover route without unrestricted fallback", () => {
+  const f = singleRouteFixture()
+  const t = f.topology
+  const start = f.problem.routeStartPort[0]!,
+    goal = f.problem.routeEndPort[0]!
+  t.portY[start] = 0
+  t.portY[goal] = 0
+  for (let i = 0; i < t.portCount; i++) {
+    if (
+      i !== start &&
+      i !== goal &&
+      t.incidentPortRegion[i]?.some((r) => r <= 2) &&
+      t.incidentPortRegion[i]!.length >= 2
+    )
+      t.portY[i] = 2.5
+    for (
+      let slot = 0;
+      slot < Math.min(t.incidentPortRegion[i]?.length ?? 0, 2);
+      slot++
+    ) {
+      const region = t.incidentPortRegion[i]![slot]!
+      const angle = Math.round(
+        (Math.atan2(
+          t.portY[i]! - t.regionCenterY[region]!,
+          t.portX[i]! - t.regionCenterX[region]!,
+        ) *
+          18000) /
+          Math.PI,
+      )
+      if (slot === 0) t.portAngleForRegion1[i] = angle
+      else t.portAngleForRegion2![i] = angle
+    }
+  }
+  const reference = new PreparedPortPointRoutingSolver(t, f.problem, f.options)
+  reference.solve()
+  const candidate = new PreparedPortPointRoutingSolver(t, f.problem, {
+    ...f.options,
+    LOCAL_ROUTE_CORRIDOR_INITIAL_MARGIN: 0.05,
+    LOCAL_ROUTE_CORRIDOR_GROWTH_FACTOR: 100,
+    LOCAL_ROUTE_CORRIDOR_MAX_EXPANSIONS: 2,
+    LOCAL_ROUTE_CORRIDOR_WINDOW_ITERATIONS: 15,
+  })
+  candidate.solve()
+  expect(reference.solved).toBe(true)
+  expect(candidate.solved).toBe(true)
+  expect(candidate.corridorStats.widened).toBe(1)
+  expect(candidate.corridorStats.fullFallbacks).toBe(0)
+  expect(candidate.state.regionSegments).toEqual(reference.state.regionSegments)
+})
