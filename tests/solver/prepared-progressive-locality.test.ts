@@ -250,3 +250,33 @@ test("deterministic multi-route variations terminate without losing source route
     }
   }
 })
+
+test("a truly disconnected source stays unconnected after every corridor fallback", () => {
+  const f = singleRouteFixture()
+  const { topology, problem } = f
+  for (let port = 0; port < topology.portCount; port++) {
+    const regions = topology.incidentPortRegion[port] ?? []
+    if (regions.length >= 2 && regions.some((region) => region <= 2))
+      problem.portSectionMask[port] = 0
+  }
+  const initialMask = Array.from(problem.portSectionMask)
+  const original = new PreparedPortPointRoutingSolver(
+    topology,
+    problem,
+    f.options,
+  )
+  original.solve()
+  const adaptive = new PreparedPortPointRoutingSolver(topology, problem, {
+    ...f.options,
+    LOCAL_ROUTE_CORRIDOR_INITIAL_MARGIN: 0.1,
+    LOCAL_ROUTE_CORRIDOR_MAX_EXPANSIONS: 2,
+    LOCAL_ROUTE_CORRIDOR_GROWTH_FACTOR: 5,
+    LOCAL_ROUTE_CORRIDOR_WINDOW_ITERATIONS: 20,
+  })
+  adaptive.solve()
+  expect(original.solved).toBe(false)
+  expect(adaptive.solved).toBe(false)
+  expect(adaptive.state.regionSegments).toEqual(original.state.regionSegments)
+  expect(adaptive.state.portAssignment).toEqual(original.state.portAssignment)
+  expect(Array.from(problem.portSectionMask)).toEqual(initialMask)
+})
