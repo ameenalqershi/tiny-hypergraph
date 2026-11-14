@@ -1,3 +1,4 @@
+import type { RouteSearchDiagnostics } from "./prepared/RouteSearchDiagnostics"
 import { BaseSolver } from "@tscircuit/solver-utils"
 import type { GraphicsObject } from "graphics-debug"
 import { convertToSerializedHyperGraph } from "./compat/convertToSerializedHyperGraph"
@@ -329,6 +330,8 @@ export interface TinyHyperGraphSolverOptions {
   LOCAL_ROUTE_CORRIDOR_GROWTH_FACTOR?: number
   LOCAL_ROUTE_CORRIDOR_MAX_EXPANSIONS?: number
   LOCAL_ROUTE_CORRIDOR_WINDOW_ITERATIONS?: number
+  /** Optional bounded, read-only per-route search counters. No algorithm change. */
+  ROUTE_SEARCH_DIAGNOSTICS?: boolean
 }
 
 export interface TinyHyperGraphSolverOptionTarget {
@@ -581,6 +584,7 @@ export class TinyHyperGraphSolver extends BaseSolver {
   OWNED_REGIONAL_HOP_FRONTIER = false
   /** Optional route-scoped candidate filter; undefined in normal routing. */
   routeSearchPortPredicate?: (portId: PortId) => boolean
+  routeSearchDiagnostics?: RouteSearchDiagnostics
 
   override MAX_ITERATIONS = 1e6
   VERBOSE = false
@@ -868,6 +872,7 @@ export class TinyHyperGraphSolver extends BaseSolver {
     }
 
     const currentCandidate = state.candidateQueue.dequeue()
+    if (currentCandidate) this.routeSearchDiagnostics?.record("queuePop")
 
     if (!currentCandidate) {
       this.onOutOfCandidates()
@@ -880,13 +885,17 @@ export class TinyHyperGraphSolver extends BaseSolver {
     if (
       this.routeSearchPortPredicate &&
       !this.routeSearchPortPredicate(currentCandidate.portId)
-    )
+    ) {
+      this.routeSearchDiagnostics?.record("candidateOutOfCorridor")
       return
+    }
     if (currentCandidate.g > this.getCandidateBestCost(currentCandidateHopId)) {
+      this.routeSearchDiagnostics?.record("staleCandidate")
       return
     }
 
     if (this.isRegionReservedForDifferentNet(currentCandidate.nextRegionId)) {
+      this.routeSearchDiagnostics?.record("currentRegionReserved")
       return
     }
 
@@ -905,22 +914,33 @@ export class TinyHyperGraphSolver extends BaseSolver {
     }
 
     for (const neighborPortId of neighbors) {
+      this.routeSearchDiagnostics?.record("neighborScanned")
       if (
         this.routeSearchPortPredicate &&
         !this.routeSearchPortPredicate(neighborPortId)
-      )
+      ) {
+        this.routeSearchDiagnostics?.record("neighborOutOfCorridor")
         continue
+      }
       if (neighborPortId === state.goalPortId) {
+        this.routeSearchDiagnostics?.record("goalSeen")
         const assignedNetId = state.portAssignment[neighborPortId]
-        if (this.isPortReservedForDifferentNet(neighborPortId)) continue
+        if (this.isPortReservedForDifferentNet(neighborPortId)) {
+          this.routeSearchDiagnostics?.record("differentNetPortReservation")
+          continue
+        }
         if (assignedNetId !== -1 && assignedNetId !== state.currentRouteNetId) {
+          this.routeSearchDiagnostics?.record("differentNetPortAssignment")
           continue
         }
         this.onPathFound(currentCandidate)
         return
       }
       if (neighborPortId === currentCandidate.portId) continue
-      if (problem.portSectionMask[neighborPortId] === 0) continue
+      if (problem.portSectionMask[neighborPortId] === 0) {
+        this.routeSearchDiagnostics?.record("portMasked")
+        continue
+      }
 
       const nextRegionId =
         topology.incidentPortRegion[neighborPortId][0] ===
@@ -935,16 +955,27 @@ export class TinyHyperGraphSolver extends BaseSolver {
         ? state.candidateQueue.isClosedHopId(candidateHopId)
         : state.candidateQueue.isClosedHop?.(neighborPortId, nextRegionId)
       if (candidateHopIsClosed === true) {
+        this.routeSearchDiagnostics?.record("closedHop")
         continue
       }
       const assignedNetId = state.portAssignment[neighborPortId]
-      if (this.isPortReservedForDifferentNet(neighborPortId)) continue
-      if (assignedNetId !== -1 && assignedNetId !== state.currentRouteNetId) {
+      if (this.isPortReservedForDifferentNet(neighborPortId)) {
+        this.routeSearchDiagnostics?.record("differentNetPortReservation")
         continue
       }
-      if (this.isRegionReservedForDifferentNet(nextRegionId)) continue
+      if (assignedNetId !== -1 && assignedNetId !== state.currentRouteNetId) {
+        this.routeSearchDiagnostics?.record("differentNetPortAssignment")
+        continue
+      }
+      if (this.isRegionReservedForDifferentNet(nextRegionId)) {
+        this.routeSearchDiagnostics?.record("differentNetRegionReservation")
+        continue
+      }
       const previousBestCost = this.getCandidateBestCost(candidateHopId)
-      if (currentCandidate.g >= previousBestCost) continue
+      if (currentCandidate.g >= previousBestCost) {
+        this.routeSearchDiagnostics?.record("bestCostRejected")
+        continue
+      }
       const lowerBoundWithoutDistance =
         currentCandidate.g +
         state.regionCongestionCost[currentCandidate.nextRegionId]! +
@@ -961,14 +992,20 @@ export class TinyHyperGraphSolver extends BaseSolver {
         knownSegmentDistance = Math.sqrt(dx * dx + dy * dy)
         lowerBoundCost += knownSegmentDistance * this.DISTANCE_TO_COST
       }
-      if (lowerBoundCost >= previousBestCost) continue
+      if (lowerBoundCost >= previousBestCost) {
+        this.routeSearchDiagnostics?.record("lowerBoundRejected")
+        continue
+      }
       const g = this.computeG(
         currentCandidate,
         neighborPortId,
         previousBestCost,
         knownSegmentDistance,
       )
-      if (!Number.isFinite(g) || g >= previousBestCost) continue
+      if (!Number.isFinite(g) || g >= previousBestCost) {
+        this.routeSearchDiagnostics?.record("scoreRejected")
+        continue
+      }
       const h = this.computeH(neighborPortId)
 
       const newCandidate = {
@@ -989,6 +1026,7 @@ export class TinyHyperGraphSolver extends BaseSolver {
 
       this.setCandidateBestCost(candidateHopId, g)
       state.candidateQueue.queue(newCandidate)
+      this.routeSearchDiagnostics?.record("candidateQueued")
     }
   }
 
@@ -1063,15 +1101,23 @@ export class TinyHyperGraphSolver extends BaseSolver {
       const previousIndex = previousNeighborIndex
       previousNeighborIndex = currentNeighborIndex
       const neighborPortId = neighbors[currentNeighborIndex]!
+      this.routeSearchDiagnostics?.record("neighborScanned")
       if (
         this.routeSearchPortPredicate &&
         !this.routeSearchPortPredicate(neighborPortId)
-      )
+      ) {
+        this.routeSearchDiagnostics?.record("neighborOutOfCorridor")
         continue
+      }
       if (neighborPortId === state.goalPortId) {
+        this.routeSearchDiagnostics?.record("goalSeen")
         const assignedNetId = state.portAssignment[neighborPortId]
-        if (this.isPortReservedForDifferentNet(neighborPortId)) continue
+        if (this.isPortReservedForDifferentNet(neighborPortId)) {
+          this.routeSearchDiagnostics?.record("differentNetPortReservation")
+          continue
+        }
         if (assignedNetId !== -1 && assignedNetId !== state.currentRouteNetId) {
+          this.routeSearchDiagnostics?.record("differentNetPortAssignment")
           continue
         }
         this.onPathFound(currentCandidate)
@@ -1084,7 +1130,10 @@ export class TinyHyperGraphSolver extends BaseSolver {
         nextRegionId = nextRegionIds[currentNeighborIndex]!
         candidateHopId = hopIds[currentNeighborIndex]!
       } else {
-        if (problem.portSectionMask[neighborPortId] === 0) continue
+        if (problem.portSectionMask[neighborPortId] === 0) {
+          this.routeSearchDiagnostics?.record("portMasked")
+          continue
+        }
         const nextRegion =
           topology.incidentPortRegion[neighborPortId][0] ===
           currentCandidate.nextRegionId
@@ -1098,6 +1147,7 @@ export class TinyHyperGraphSolver extends BaseSolver {
         ? state.candidateQueue.isClosedHopId(candidateHopId)
         : state.candidateQueue.isClosedHop?.(neighborPortId, nextRegionId)
       if (candidateHopIsClosed === true) {
+        this.routeSearchDiagnostics?.record("closedHop")
         if (previousIndex === -1) {
           frontier.head = neighborIndex
         } else {
@@ -1108,17 +1158,27 @@ export class TinyHyperGraphSolver extends BaseSolver {
       }
       if (!prepared[currentNeighborIndex]) {
         const assignedNetId = state.portAssignment[neighborPortId]
-        if (this.isPortReservedForDifferentNet(neighborPortId)) continue
-        if (assignedNetId !== -1 && assignedNetId !== state.currentRouteNetId) {
+        if (this.isPortReservedForDifferentNet(neighborPortId)) {
+          this.routeSearchDiagnostics?.record("differentNetPortReservation")
           continue
         }
-        if (this.isRegionReservedForDifferentNet(nextRegionId)) continue
+        if (assignedNetId !== -1 && assignedNetId !== state.currentRouteNetId) {
+          this.routeSearchDiagnostics?.record("differentNetPortAssignment")
+          continue
+        }
+        if (this.isRegionReservedForDifferentNet(nextRegionId)) {
+          this.routeSearchDiagnostics?.record("differentNetRegionReservation")
+          continue
+        }
         nextRegionIds[currentNeighborIndex] = nextRegionId
         hopIds[currentNeighborIndex] = candidateHopId
         prepared[currentNeighborIndex] = 1
       }
       const previousBestCost = this.getCandidateBestCost(candidateHopId)
-      if (currentCandidate.g >= previousBestCost) continue
+      if (currentCandidate.g >= previousBestCost) {
+        this.routeSearchDiagnostics?.record("bestCostRejected")
+        continue
+      }
       const lowerBoundWithoutDistance =
         currentCandidate.g +
         state.regionCongestionCost[currentCandidate.nextRegionId]! +
@@ -1135,14 +1195,20 @@ export class TinyHyperGraphSolver extends BaseSolver {
         knownSegmentDistance = Math.sqrt(dx * dx + dy * dy)
         lowerBoundCost += knownSegmentDistance * this.DISTANCE_TO_COST
       }
-      if (lowerBoundCost >= previousBestCost) continue
+      if (lowerBoundCost >= previousBestCost) {
+        this.routeSearchDiagnostics?.record("lowerBoundRejected")
+        continue
+      }
       const g = this.computeG(
         currentCandidate,
         neighborPortId,
         previousBestCost,
         knownSegmentDistance,
       )
-      if (!Number.isFinite(g) || g >= previousBestCost) continue
+      if (!Number.isFinite(g) || g >= previousBestCost) {
+        this.routeSearchDiagnostics?.record("scoreRejected")
+        continue
+      }
       const h = this.computeH(neighborPortId)
 
       const newCandidate = {
@@ -1163,6 +1229,7 @@ export class TinyHyperGraphSolver extends BaseSolver {
 
       this.setCandidateBestCost(candidateHopId, g)
       state.candidateQueue.queue(newCandidate)
+      this.routeSearchDiagnostics?.record("candidateQueued")
     }
   }
 

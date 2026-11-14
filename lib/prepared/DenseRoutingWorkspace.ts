@@ -50,17 +50,24 @@ export class DenseRoutingWorkspace {
       this.frontiers.clear()
     }
     const c = queue.dequeue()
+    if (c) solver.routeSearchDiagnostics?.record("queuePop")
     if (!c) {
       solver.onOutOfCandidates()
       return true
     }
-    if (corridor && !corridor.contains(c.portId, t.portX, t.portY)) return true
-    const hop = c.hopId ?? solver.getHopId(c.portId, c.nextRegionId)
-    if (
-      c.g > solver.getCandidateBestCost(hop) ||
-      solver.isRegionReservedForDifferentNet(c.nextRegionId)
-    )
+    if (corridor && !corridor.contains(c.portId, t.portX, t.portY)) {
+      solver.routeSearchDiagnostics?.record("candidateOutOfCorridor")
       return true
+    }
+    const hop = c.hopId ?? solver.getHopId(c.portId, c.nextRegionId)
+    if (c.g > solver.getCandidateBestCost(hop)) {
+      solver.routeSearchDiagnostics?.record("staleCandidate")
+      return true
+    }
+    if (solver.isRegionReservedForDifferentNet(c.nextRegionId)) {
+      solver.routeSearchDiagnostics?.record("currentRegionReserved")
+      return true
+    }
     const region = c.nextRegionId
     const net = state.currentRouteNetId!
     const goal = state.goalPortId
@@ -78,22 +85,29 @@ export class DenseRoutingWorkspace {
       for (let index = 0; index < neighbors.length; index++) {
         const port = neighbors[index]!
         const reservation = reserved[port]!
-        if (
-          reservation === -2 ||
-          (reservation !== -1 && reservation !== net) ||
-          (assign[port] !== -1 && assign[port] !== net)
-        )
+        if (reservation === -2 || (reservation !== -1 && reservation !== net)) {
+          solver.routeSearchDiagnostics?.record("differentNetPortReservation")
           continue
+        }
+        if (assign[port] !== -1 && assign[port] !== net) {
+          solver.routeSearchDiagnostics?.record("differentNetPortAssignment")
+          continue
+        }
         let nextRegion = region
         if (port !== goal) {
-          if (p.portSectionMask[port] === 0) continue
+          if (p.portSectionMask[port] === 0) {
+            solver.routeSearchDiagnostics?.record("portMasked")
+            continue
+          }
           const incident = t.incidentPortRegion[port]!
           const opposite = incident[0] === region ? incident[1] : incident[0]
-          if (
-            opposite === undefined ||
-            (regionNet[opposite] !== -1 && regionNet[opposite] !== net)
-          )
+          if (opposite === undefined) continue
+          if (regionNet[opposite] !== -1 && regionNet[opposite] !== net) {
+            solver.routeSearchDiagnostics?.record(
+              "differentNetRegionReservation",
+            )
             continue
+          }
           nextRegion = opposite
         }
         nextRegions[index] = nextRegion
@@ -184,24 +198,36 @@ export class DenseRoutingWorkspace {
       const before = previous
       previous = at
       const port = neighbors[at]!
-      if (corridor && !corridor.contains(port, t.portX, t.portY)) continue
+      solver.routeSearchDiagnostics?.record("neighborScanned")
+      if (corridor && !corridor.contains(port, t.portX, t.portY)) {
+        solver.routeSearchDiagnostics?.record("neighborOutOfCorridor")
+        continue
+      }
       if (port === state.goalPortId) {
+        solver.routeSearchDiagnostics?.record("goalSeen")
         solver.onPathFound(c)
         return
       }
       if (port === c.portId) continue
       const hop = hops[at]!
       if (queue.isClosedHopId(hop)) {
+        solver.routeSearchDiagnostics?.record("closedHop")
         if (before === -1) frontier.head = index
         else next[before] = index
         previous = before
         continue
       }
       const old = seen[hop] === generation ? best[hop]! : Infinity
-      if (c.g >= old) continue
+      if (c.g >= old) {
+        solver.routeSearchDiagnostics?.record("bestCostRejected")
+        continue
+      }
       const distanceCost = distances[offset + at]! * solver.DISTANCE_TO_COST
       const penalty = p.portPenalty?.[port] ?? 0
-      if (base + penalty + distanceCost >= old) continue
+      if (base + penalty + distanceCost >= old) {
+        solver.routeSearchDiagnostics?.record("lowerBoundRejected")
+        continue
+      }
       const vz = t.portZ[port]!
       const va =
         t.incidentPortRegion[port]![0] === region
@@ -222,7 +248,10 @@ export class DenseRoutingWorkspace {
         if (mask & layers[i]!) same++
         else cross++
       }
-      if (same > 0 && row.single) continue
+      if (same > 0 && row.single) {
+        solver.routeSearchDiagnostics?.record("scoreRejected")
+        continue
+      }
       // Preserve the native addition order, including roundoff and heap ties.
       const g =
         c.g +
@@ -230,10 +259,14 @@ export class DenseRoutingWorkspace {
         congestion +
         penalty +
         distanceCost
-      if (!Number.isFinite(g) || g >= old) continue
+      if (!Number.isFinite(g) || g >= old) {
+        solver.routeSearchDiagnostics?.record("scoreRejected")
+        continue
+      }
       const h = solver.computeH(port)
       seen[hop] = generation
       best[hop] = g
+      solver.routeSearchDiagnostics?.record("candidateQueued")
       queue.queue({
         hopId: hop,
         prevRegionId: region,

@@ -5,6 +5,7 @@ import { SelectiveReripTinyHyperGraphSolverWithStableInitialAssignments } from "
 import { DenseRoutingWorkspace } from "./DenseRoutingWorkspace"
 import { PreparedRoutingGeometry } from "./PreparedRoutingGeometry"
 import { RouteSearchCorridor } from "./RouteSearchCorridor"
+import { RouteSearchDiagnostics } from "./RouteSearchDiagnostics"
 
 class PreparedFinalRouteSolver extends SelectiveReripTinyHyperGraphSolver {
   private readonly workspace: DenseRoutingWorkspace
@@ -52,6 +53,9 @@ export class PreparedPortPointRoutingSolver extends SelectiveReripTinyHyperGraph
     options?: TinyHyperGraphSolverOptions,
   ) {
     super(topology, problem, options)
+    if (options?.ROUTE_SEARCH_DIAGNOSTICS === true) {
+      this.routeSearchDiagnostics = new RouteSearchDiagnostics()
+    }
     if (options?.LOCAL_ROUTE_CORRIDOR_INITIAL_MARGIN !== undefined) {
       this.corridor = new RouteSearchCorridor({
         initialMargin: options.LOCAL_ROUTE_CORRIDOR_INITIAL_MARGIN,
@@ -80,6 +84,11 @@ export class PreparedPortPointRoutingSolver extends SelectiveReripTinyHyperGraph
             this.topology.portY,
           )
       : undefined
+    this.routeSearchDiagnostics?.beginRoute(
+      routeId,
+      this.iterations,
+      this.corridor?.currentMargin ?? null,
+    )
     if (this.corridor?.isBounded) this.corridorStats.boundedRouteStarts++
   }
 
@@ -127,8 +136,20 @@ export class PreparedPortPointRoutingSolver extends SelectiveReripTinyHyperGraph
       this.corridorStats.fullFallbacks++
       this.routeSearchPortPredicate = undefined
     }
+    this.routeSearchDiagnostics?.nextWindow(
+      this.iterations,
+      this.corridor.currentMargin,
+    )
     this.restartCurrentRoute()
     return true
+  }
+
+  override onPathFound(
+    candidate: Parameters<TinyHyperGraphSolver["onPathFound"]>[0],
+  ): void {
+    this.routeSearchDiagnostics?.record("pathFound")
+    this.routeSearchDiagnostics?.endRoute(this.iterations, true)
+    super.onPathFound(candidate)
   }
 
   override onOutOfCandidates(): void {
