@@ -220,3 +220,33 @@ test("intermediate widening can recover route without unrestricted fallback", ()
   expect(candidate.corridorStats.fullFallbacks).toBe(0)
   expect(candidate.state.regionSegments).toEqual(reference.state.regionSegments)
 })
+
+test("deterministic multi-route variations terminate without losing source routes or mutating masks", () => {
+  for (const margin of [0.01, 0.2, 1, 3]) {
+    for (const maxExpansions of [0, 1, 2]) {
+      const f = createPreparedRoutingFixture()
+      const before = Array.from(f.problem.portSectionMask)
+      const candidate = new PreparedPortPointRoutingSolver(
+        f.topology,
+        f.problem,
+        {
+          ...f.options,
+          LOCAL_ROUTE_CORRIDOR_INITIAL_MARGIN: margin,
+          LOCAL_ROUTE_CORRIDOR_GROWTH_FACTOR: 3,
+          LOCAL_ROUTE_CORRIDOR_MAX_EXPANSIONS: maxExpansions,
+          LOCAL_ROUTE_CORRIDOR_WINDOW_ITERATIONS: 100,
+        },
+      )
+      candidate.solve()
+      expect(candidate.solved).toBe(true)
+      expect(candidate.failed).toBe(false)
+      expect(candidate.state.unroutedRoutes).toHaveLength(0)
+      expect(candidate.state.currentRouteId).toBeUndefined()
+      expect(Array.from(f.problem.portSectionMask)).toEqual(before)
+      const completed = new Set(
+        candidate.state.regionSegments.flatMap((s) => s.map((seg) => seg[0])),
+      )
+      expect(completed.size).toBe(f.problem.routeCount)
+    }
+  }
+})
